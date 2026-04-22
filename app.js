@@ -10,6 +10,7 @@
     state: "/api/state",
     models: "/api/models",
     queries: "/api/queries",
+    dictionary: "/api/dictionary",
     llmConfig: "/api/llm-config",
     generateSql: "/api/generate-sql",
     codexLoginStatus: "/api/codex-login-status",
@@ -128,6 +129,7 @@ CREATE TABLE refunds (
     sqlDialect: "hive",
     sqlStrictMode: true,
     savedQueries: [],
+    dictionaryEntries: [],
     llmConfig: clone(DEFAULT_LLM_CONFIG),
     codexLoginStatus: {
       configured: false,
@@ -139,6 +141,7 @@ CREATE TABLE refunds (
     aiLoading: false,
     sqlDraft: "",
     sqlDraftSource: "",
+    editingModelId: "",
     activeConfigTab: "model",
   };
 
@@ -162,6 +165,8 @@ CREATE TABLE refunds (
       modelTableNameInput: document.getElementById("model-table-name-input"),
       modelDdlInput: document.getElementById("model-ddl-input"),
       modelFileInput: document.getElementById("model-file-input"),
+      loadActiveModelDraftButton: document.getElementById("load-active-model-draft-btn"),
+      updateActiveModelButton: document.getElementById("update-active-model-btn"),
       baseTableSelect: document.getElementById("base-table-select"),
       templateStrip: document.getElementById("template-strip"),
       joinsList: document.getElementById("joins-list"),
@@ -191,6 +196,12 @@ CREATE TABLE refunds (
       generateAiSqlButton: document.getElementById("generate-ai-sql-btn"),
       clearAiResultButton: document.getElementById("clear-ai-result-btn"),
       aiResultStatus: document.getElementById("ai-result-status"),
+      dictTermInput: document.getElementById("dict-term-input"),
+      dictFieldInput: document.getElementById("dict-field-input"),
+      dictFieldOptions: document.getElementById("dict-field-options"),
+      dictDescriptionInput: document.getElementById("dict-description-input"),
+      addDictionaryEntryButton: document.getElementById("add-dictionary-entry-btn"),
+      dictionaryList: document.getElementById("dictionary-list"),
       querySummary: document.getElementById("query-summary"),
       sqlStatus: document.getElementById("sql-status"),
       sqlOutput: document.getElementById("sql-output"),
@@ -216,6 +227,7 @@ CREATE TABLE refunds (
         ? payload.activeModelId
         : state.models[0]?.id || "";
       state.savedQueries = Array.isArray(payload.savedQueries) ? payload.savedQueries : [];
+      state.dictionaryEntries = Array.isArray(payload.dictionaryEntries) ? payload.dictionaryEntries : [];
       state.llmConfig = normalizeLlmConfig(payload.llmConfig);
       state.codexLoginStatus = normalizeCodexLoginStatus(payload.codexLoginStatus);
 
@@ -227,6 +239,7 @@ CREATE TABLE refunds (
       state.models = [clone(SAMPLE_MODEL)];
       state.activeModelId = SAMPLE_MODEL.id;
       state.savedQueries = [];
+      state.dictionaryEntries = [];
       state.llmConfig = clone(DEFAULT_LLM_CONFIG);
       state.codexLoginStatus = clone(EMPTY_STATE.codexLoginStatus);
       pushSqlStatus(
@@ -432,6 +445,7 @@ CREATE TABLE refunds (
 
     dom.modelSelect.addEventListener("change", async (event) => {
       state.activeModelId = event.target.value;
+      state.editingModelId = "";
       state.aiResult = null;
       await persistModels();
       loadActiveModelSchema({ resetBuilder: true, quiet: true });
@@ -477,10 +491,19 @@ CREATE TABLE refunds (
       await handleSaveModel();
     });
 
+    dom.loadActiveModelDraftButton.addEventListener("click", () => {
+      loadActiveModelIntoDraft();
+    });
+
+    dom.updateActiveModelButton.addEventListener("click", async () => {
+      await handleUpdateActiveModel();
+    });
+
     document.getElementById("clear-model-draft-btn").addEventListener("click", () => {
       state.modelDraftEnv = "prd";
       state.modelDraftTableName = "";
       state.modelDraftDdl = "";
+      state.editingModelId = "";
       syncDraftInputs();
     });
 
@@ -488,6 +511,7 @@ CREATE TABLE refunds (
       state.modelDraftEnv = "demo";
       state.modelDraftTableName = "电商演示模型";
       state.modelDraftDdl = SAMPLE_DDL;
+      state.editingModelId = "";
       syncDraftInputs();
     });
 
@@ -665,6 +689,22 @@ CREATE TABLE refunds (
       }
     });
 
+    dom.dictFieldInput.addEventListener("input", () => renderDictionaryFieldOptions());
+    dom.dictFieldInput.addEventListener("focus", () => renderDictionaryFieldOptions());
+    dom.addDictionaryEntryButton.addEventListener("click", async () => {
+      await handleSaveDictionaryEntry();
+    });
+    dom.dictionaryList.addEventListener("click", async (event) => {
+      const button = event.target.closest("[data-delete-dict-entry]");
+      if (!button) {
+        return;
+      }
+      state.dictionaryEntries = state.dictionaryEntries.filter((item) => item.id !== button.dataset.deleteDictEntry);
+      await persistDictionary();
+      renderDictionary();
+      pushSqlStatus("info", "字典项已删除。");
+    });
+
     dom.sqlOutput.addEventListener("input", () => {
       state.sqlDraft = dom.sqlOutput.value;
       state.sqlDraftSource = "manual";
@@ -781,6 +821,18 @@ CREATE TABLE refunds (
     }
   }
 
+  async function persistDictionary() {
+    try {
+      await postJson(API_PATHS.dictionary, {
+        entries: state.dictionaryEntries,
+      });
+      return true;
+    } catch (error) {
+      pushSqlStatus("error", `字段字典写入失败：${error.message || "未知错误"}`);
+      return false;
+    }
+  }
+
   async function persistLlmConfig() {
     try {
       const payload = normalizeLlmConfig(state.llmConfig);
@@ -855,7 +907,11 @@ CREATE TABLE refunds (
       const result = await postJson(API_PATHS.generateSql, {
         activeModelId: state.activeModelId,
         prompt,
-        builderSpec: exportQuerySpec(),
+        builderSpec: {
+          ...exportQuerySpec(),
+          schemaSummary: buildSchemaSummaryForAi(),
+          dictionaryEntries: getActiveDictionaryEntries(),
+        },
       });
       state.aiResult = result;
       state.aiLoading = false;
@@ -881,32 +937,9 @@ CREATE TABLE refunds (
     const env = state.modelDraftEnv.trim();
     const tableName = state.modelDraftTableName.trim();
     const ddl = state.modelDraftDdl.trim();
-
-    if (!env) {
-      pushSqlStatus("error", "请输入环境，例如 pre、load、prd。");
-      return;
-    }
-
-    if (!tableName) {
-      pushSqlStatus("error", "请输入表名或模型名。");
-      return;
-    }
-
-    if (!ddl) {
-      pushSqlStatus("error", "请输入 DDL 后再保存模型。");
-      return;
-    }
-
-    let schema;
-    try {
-      schema = parseDDL(ddl);
-    } catch (error) {
-      pushSqlStatus("error", error.message || "DDL 解析失败，模型未保存。");
-      return;
-    }
-
-    if (!schema.tables.length) {
-      pushSqlStatus("error", "DDL 中没有识别到 CREATE TABLE 语句。");
+    const validation = validateModelDraft(env, tableName, ddl);
+    if (!validation.ok) {
+      pushSqlStatus("error", validation.error);
       return;
     }
 
@@ -955,9 +988,98 @@ CREATE TABLE refunds (
     state.modelDraftEnv = "prd";
     state.modelDraftTableName = "";
     state.modelDraftDdl = "";
+    state.editingModelId = "";
     loadActiveModelSchema({ resetBuilder: true, quiet: true });
     render();
     pushSqlStatus("info", `模型「${modelLabel}」已保存到本地文件，可直接在上方选择使用。`);
+  }
+
+  function loadActiveModelIntoDraft() {
+    const activeModel = getActiveModel();
+    if (!activeModel) {
+      pushSqlStatus("error", "当前没有可编辑的模型。");
+      return;
+    }
+    state.modelDraftEnv = activeModel.env || "default";
+    state.modelDraftTableName = activeModel.tableName || activeModel.name || "";
+    state.modelDraftDdl = activeModel.ddl || "";
+    state.editingModelId = activeModel.id;
+    syncDraftInputs();
+    pushSqlStatus("info", `已载入模型「${buildModelLabel(activeModel)}」到编辑区。`);
+  }
+
+  async function handleUpdateActiveModel() {
+    const editingModel = state.models.find((model) => model.id === state.editingModelId) || getActiveModel();
+    if (!editingModel) {
+      pushSqlStatus("error", "当前没有可更新的模型。");
+      return;
+    }
+    if (editingModel.builtIn) {
+      pushSqlStatus("error", "内置演示模型不允许直接修改；请使用“保存为模型”另存。");
+      return;
+    }
+
+    const env = state.modelDraftEnv.trim();
+    const tableName = state.modelDraftTableName.trim();
+    const ddl = state.modelDraftDdl.trim();
+    const validation = validateModelDraft(env, tableName, ddl);
+    if (!validation.ok) {
+      pushSqlStatus("error", validation.error);
+      return;
+    }
+
+    const duplicate = state.models.find(
+      (model) =>
+        model.id !== editingModel.id &&
+        model.env.toLowerCase() === env.toLowerCase() &&
+        model.tableName.toLowerCase() === tableName.toLowerCase()
+    );
+    const nextLabel = buildModelLabel({ env, tableName });
+    if (duplicate) {
+      pushSqlStatus("error", `模型「${nextLabel}」已存在，不能把当前模型重命名为同名模型。`);
+      return;
+    }
+
+    const oldLabel = buildModelLabel(editingModel);
+    editingModel.env = env;
+    editingModel.tableName = tableName;
+    editingModel.name = nextLabel;
+    editingModel.ddl = ddl;
+    editingModel.updatedAt = new Date().toISOString();
+    state.activeModelId = editingModel.id;
+    state.editingModelId = editingModel.id;
+    state.aiResult = null;
+    state.aiLoading = false;
+
+    const ok = await persistModels();
+    if (!ok) {
+      return;
+    }
+
+    loadActiveModelSchema({ resetBuilder: true, quiet: true });
+    render();
+    pushSqlStatus("info", `模型已更新：${oldLabel} -> ${nextLabel}。已保留原模型 ID，历史模板关联不受影响。`);
+  }
+
+  function validateModelDraft(env, tableName, ddl) {
+    if (!env) {
+      return { ok: false, error: "请输入环境，例如 pre、load、prd。" };
+    }
+    if (!tableName) {
+      return { ok: false, error: "请输入表名或模型名。" };
+    }
+    if (!ddl) {
+      return { ok: false, error: "请输入 DDL 后再保存模型。" };
+    }
+    try {
+      const schema = parseDDL(ddl);
+      if (!schema.tables.length) {
+        return { ok: false, error: "DDL 中没有识别到 CREATE TABLE 语句。" };
+      }
+    } catch (error) {
+      return { ok: false, error: error.message || "DDL 解析失败，模型未保存。" };
+    }
+    return { ok: true };
   }
 
   async function handleDeleteActiveModel() {
@@ -1831,6 +1953,7 @@ CREATE TABLE refunds (
     renderSortControls();
     renderPreview();
     renderSavedQueries();
+    renderDictionary();
     renderConfigTabs();
   }
 
@@ -1852,6 +1975,9 @@ CREATE TABLE refunds (
     dom.modelEnvInput.value = state.modelDraftEnv;
     dom.modelTableNameInput.value = state.modelDraftTableName;
     dom.modelDdlInput.value = state.modelDraftDdl;
+    const canUpdateActiveModel =
+      Boolean(state.editingModelId && state.editingModelId === state.activeModelId && getActiveModel());
+    dom.updateActiveModelButton.disabled = !canUpdateActiveModel;
     dom.schemaTableSearchInput.value = state.schemaTableSearch;
     dom.schemaColumnSearchInput.value = state.schemaColumnSearch;
     dom.limitInput.value = state.limit;
@@ -2098,7 +2224,7 @@ CREATE TABLE refunds (
                 <span class="column-pill">
                   <code>${escapeHtml(column.name)}</code> · ${escapeHtml(column.type)}${
                     column.partition ? " · 分区" : ""
-                  }
+                  }${column.comment ? ` · ${escapeHtml(column.comment)}` : ""}
                 </span>
               `
             )
@@ -2355,12 +2481,28 @@ CREATE TABLE refunds (
 
   function renderDimensionPicker() {
     const availableFields = getAvailableFields();
+    const query = dom.dimensionAddInput.value.trim();
 
     renderDimensionFieldOptions(dom.dimensionAddInput.value);
 
     if (!availableFields.length) {
       dom.selectedDimensionsList.className = "selected-list empty-state";
       dom.selectedDimensionsList.textContent = "请先选择基表或补充 Join。";
+      return;
+    }
+
+    const selectedFields = state.selectedDimensions.map((fieldId) => getFieldById(fieldId)).filter(Boolean);
+    const visibleFields = query
+      ? availableFields
+          .filter((field) => getFieldOptionLabel(field, availableFields).toLowerCase().includes(query.toLowerCase()))
+          .slice(0, 60)
+      : selectedFields;
+
+    if (!visibleFields.length) {
+      dom.selectedDimensionsList.className = "selected-list empty-state";
+      dom.selectedDimensionsList.textContent = state.selectedDimensions.length
+        ? "已选择的字段当前不可用。"
+        : "未选择输出字段，默认 SELECT *。输入字段名后可搜索添加。";
       return;
     }
 
@@ -2372,10 +2514,10 @@ CREATE TABLE refunds (
             ? `已选择 ${state.selectedDimensions.length} 个字段`
             : "未选择字段，默认查询全部字段（SELECT *）"
         }</span>
-        <span>点击下方字段 Tag 可快速选择 / 取消</span>
+        <span>${query ? "搜索结果，点击字段 Tag 可选择 / 取消" : "仅展示已选字段；搜索后显示候选字段"}</span>
       </div>
       <div class="field-tag-cloud">
-        ${availableFields.map(renderDimensionTag).join("")}
+        ${visibleFields.map(renderDimensionTag).join("")}
       </div>
     `;
   }
@@ -2865,6 +3007,89 @@ CREATE TABLE refunds (
       sqlDialect: state.sqlDialect,
       sqlStrictMode: state.sqlStrictMode,
     };
+  }
+
+  function buildSchemaSummaryForAi() {
+    return {
+      tables: (state.schema.tables || []).map((table) => ({
+        name: table.name,
+        columns: (table.columns || []).map((column) => ({
+          name: column.name,
+          type: column.type || "",
+          kind: column.kind || "",
+          comment: column.comment || "",
+          partition: Boolean(column.partition),
+        })),
+      })),
+    };
+  }
+
+  function getActiveDictionaryEntries() {
+    return state.dictionaryEntries.filter((item) => item.activeModelId === state.activeModelId);
+  }
+
+  async function handleSaveDictionaryEntry() {
+    const term = dom.dictTermInput.value.trim();
+    const fieldMatch = findFieldMatch(dom.dictFieldInput.value);
+    const description = dom.dictDescriptionInput.value.trim();
+    if (!state.activeModelId) {
+      pushSqlStatus("error", "请先选择模型，再保存字段字典。");
+      return;
+    }
+    if (!term || !fieldMatch) {
+      pushSqlStatus("error", "请输入业务词，并选择一个 DDL 中存在的字段。");
+      return;
+    }
+    const id = `${state.activeModelId}:${term}:${fieldMatch.id}`;
+    const entry = {
+      id,
+      activeModelId: state.activeModelId,
+      term,
+      field: fieldMatch.id,
+      description,
+      updatedAt: new Date().toISOString(),
+    };
+    state.dictionaryEntries = state.dictionaryEntries.filter((item) => item.id !== id);
+    state.dictionaryEntries.unshift(entry);
+    const ok = await persistDictionary();
+    if (!ok) {
+      return;
+    }
+    dom.dictTermInput.value = "";
+    dom.dictFieldInput.value = "";
+    dom.dictDescriptionInput.value = "";
+    renderDictionary();
+    pushSqlStatus("info", `字段字典已保存：${term} -> ${fieldMatch.id}`);
+  }
+
+  function renderDictionaryFieldOptions() {
+    dom.dictFieldOptions.innerHTML = renderOptionValues(
+      getFieldSuggestionLabels(dom.dictFieldInput.value, getAvailableFields())
+    );
+  }
+
+  function renderDictionary() {
+    renderDictionaryFieldOptions();
+    const entries = getActiveDictionaryEntries();
+    if (!entries.length) {
+      dom.dictionaryList.className = "saved-list empty-state";
+      dom.dictionaryList.textContent = "当前模型还没有配置业务字段字典。";
+      return;
+    }
+    dom.dictionaryList.className = "saved-list";
+    dom.dictionaryList.innerHTML = entries
+      .map(
+        (entry) => `
+          <article class="saved-query-card">
+            <div>
+              <strong>${escapeHtml(entry.term)}</strong>
+              <p>${escapeHtml(entry.field)}${entry.description ? ` · ${escapeHtml(entry.description)}` : ""}</p>
+            </div>
+            <button class="icon-button" data-delete-dict-entry="${escapeAttr(entry.id)}">删除</button>
+          </article>
+        `
+      )
+      .join("");
   }
 
   function importQuerySpec(spec) {
@@ -4388,6 +4613,7 @@ CREATE TABLE refunds (
 
     const name = cleanIdentifier(nameMatch[1]);
     const remainder = fragment.slice(nameMatch[0].length).trim();
+    const comment = extractColumnComment(remainder);
     const tokens = remainder.split(/\s+/);
     const typeTokens = [];
     const stopWords = new Set([
@@ -4420,7 +4646,14 @@ CREATE TABLE refunds (
       name,
       type,
       kind: inferKind(type),
+      comment,
     };
+  }
+
+  function extractColumnComment(fragment) {
+    const match = String(fragment || "").match(/\bcomment\s+('((?:\\'|''|[^'])*)'|"((?:\\"|""|[^"])*)")/i);
+    const raw = match ? match[2] ?? match[3] ?? "" : "";
+    return raw.replace(/''/g, "'").replace(/\\"/g, '"').replace(/""/g, '"').trim();
   }
 
   function cleanIdentifier(value) {

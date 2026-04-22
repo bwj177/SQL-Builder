@@ -98,6 +98,8 @@
               ></textarea>
               <div class="inline-actions">
                 <button id="save-model-btn" class="primary">保存为模型</button>
+                <button id="load-active-model-draft-btn">编辑当前模型</button>
+                <button id="update-active-model-btn">保存当前模型修改</button>
                 <button id="clear-model-draft-btn">清空草稿</button>
               </div>
             </div>
@@ -306,6 +308,33 @@
               <button id="generate-ai-sql-btn" class="primary">AI 生成 SQL</button>
               <button id="clear-ai-result-btn">清除 AI 结果</button>
               <span id="ai-result-status" class="status-chip muted">当前显示手动生成结果</span>
+            </div>
+            <div class="builder-section">
+              <div class="section-head compact">
+                <div>
+                  <p class="section-kicker">Dictionary</p>
+                  <h2>业务字段字典</h2>
+                </div>
+              </div>
+              <div class="form-grid">
+                <label class="field">
+                  <span>业务词</span>
+                  <input id="dict-term-input" type="text" placeholder="例如：原币金额、账期、供应商" />
+                </label>
+                <label class="field">
+                  <span>映射字段</span>
+                  <input id="dict-field-input" type="text" list="dict-field-options" placeholder="输入字段名搜索" />
+                  <datalist id="dict-field-options"></datalist>
+                </label>
+                <label class="field">
+                  <span>说明</span>
+                  <input id="dict-description-input" type="text" placeholder="可选，补充匹配规则" />
+                </label>
+              </div>
+              <div class="inline-actions">
+                <button id="add-dictionary-entry-btn">保存字典项</button>
+              </div>
+              <div id="dictionary-list" class="saved-list empty-state">当前模型还没有配置业务字段字典。</div>
             </div>
           </section>
 
