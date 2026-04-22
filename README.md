@@ -14,6 +14,7 @@
 - **聚合查询**：支持 `SUM`、`AVG`、`COUNT`、`COUNT DISTINCT`、`MIN`、`MAX`。
 - **模板管理**：查询模板支持 `目录/子目录/模板名` 的层级保存和载入。
 - **SQL 实时预览**：配置变化后实时生成 SQL，支持一键复制。
+- **SQL 方言与严格模式**：支持 Hive/Spark、MySQL、Presto/Trino、通用 SQL；严格模式下自动添加表别名和字段引用，降低保留字、同名字段导致的 SQL 错误。
 - **AI 生成 SQL**：可选使用 OpenAI 兼容接口，或本机 Codex 登录态桥接生成 SQL。
 - **本地文件存储**：模型、模板和 AI 配置默认保存在本地 `data/*.json`，不会提交到 Git。
 
@@ -135,4 +136,3 @@ rg -n -i "api[_-]?key|secret|token|password|cookie|authorization|bearer|sk-" .
 ```
 
 确认 `data/*.json`、`.env*`、密钥文件和本地缓存没有出现在待提交列表中。
-

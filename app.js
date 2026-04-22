@@ -91,6 +91,7 @@ CREATE TABLE refunds (
   ];
 
   const AGGREGATIONS = ["sum", "avg", "count", "count_distinct", "min", "max"];
+  const SQL_DIALECTS = ["hive", "mysql", "presto", "plain"];
   const DEFAULT_LLM_CONFIG = {
     provider: "codex_cli",
     baseUrl: "https://api.openai.com/v1",
@@ -118,8 +119,14 @@ CREATE TABLE refunds (
     filters: [],
     filterConditionOperator: "and",
     filterGroupOperator: "and",
+    havingFilters: [],
+    havingConditionOperator: "and",
+    havingGroupOperator: "and",
     sort: { field: "", dir: "desc" },
     limit: "100",
+    offset: "",
+    sqlDialect: "hive",
+    sqlStrictMode: true,
     savedQueries: [],
     llmConfig: clone(DEFAULT_LLM_CONFIG),
     codexLoginStatus: {
@@ -130,6 +137,8 @@ CREATE TABLE refunds (
     aiPrompt: "",
     aiResult: null,
     aiLoading: false,
+    sqlDraft: "",
+    sqlDraftSource: "",
     activeConfigTab: "model",
   };
 
@@ -161,10 +170,14 @@ CREATE TABLE refunds (
       selectedDimensionsList: document.getElementById("selected-dimensions-list"),
       metricsList: document.getElementById("metrics-list"),
       filtersList: document.getElementById("filters-list"),
+      havingFiltersList: document.getElementById("having-filters-list"),
       sortFieldInput: document.getElementById("sort-field-input"),
       sortFieldOptions: document.getElementById("sort-field-options"),
       sortDirectionSelect: document.getElementById("sort-direction-select"),
       limitInput: document.getElementById("limit-input"),
+      offsetInput: document.getElementById("offset-input"),
+      sqlDialectSelect: document.getElementById("sql-dialect-select"),
+      sqlStrictModeInput: document.getElementById("sql-strict-mode-input"),
       llmProviderSelect: document.getElementById("llm-provider-select"),
       llmBaseUrlInput: document.getElementById("llm-base-url-input"),
       llmModelInput: document.getElementById("llm-model-input"),
@@ -403,7 +416,7 @@ CREATE TABLE refunds (
     });
 
     document.getElementById("execute-sql-btn").addEventListener("click", () => {
-      handleExecuteSqlPreview();
+      handleValidateSqlSyntax();
     });
 
     dom.configTabButtons.forEach((button) => {
@@ -502,6 +515,7 @@ CREATE TABLE refunds (
       state.selectedDimensions = [];
       state.metrics = [];
       state.filters = [];
+      state.havingFilters = [];
       state.sort.field = "";
       render();
     });
@@ -519,6 +533,21 @@ CREATE TABLE refunds (
 
     dom.limitInput.addEventListener("input", (event) => {
       state.limit = event.target.value;
+      render();
+    });
+
+    dom.offsetInput.addEventListener("input", (event) => {
+      state.offset = event.target.value;
+      render();
+    });
+
+    dom.sqlDialectSelect.addEventListener("change", (event) => {
+      state.sqlDialect = normalizeSqlDialect(event.target.value);
+      render();
+    });
+
+    dom.sqlStrictModeInput.addEventListener("change", (event) => {
+      state.sqlStrictMode = event.target.checked;
       render();
     });
 
@@ -617,13 +646,28 @@ CREATE TABLE refunds (
       render();
     });
 
+    document.getElementById("add-having-filter-btn").addEventListener("click", () => {
+      state.havingFilters.push(createDefaultFilter(getLastHavingGroupId()));
+      render();
+    });
+
+    document.getElementById("add-having-group-btn").addEventListener("click", () => {
+      state.havingFilters.push(createDefaultFilter(createNextHavingGroupId()));
+      render();
+    });
+
     document.getElementById("copy-sql-btn").addEventListener("click", async () => {
       try {
-        await navigator.clipboard.writeText(dom.sqlOutput.textContent || "");
+        await navigator.clipboard.writeText(getCurrentSqlText());
         pushSqlStatus("info", "SQL 已复制到剪贴板。");
       } catch (_error) {
         pushSqlStatus("error", "当前浏览器不允许直接写入剪贴板。");
       }
+    });
+
+    dom.sqlOutput.addEventListener("input", () => {
+      state.sqlDraft = dom.sqlOutput.value;
+      state.sqlDraftSource = "manual";
     });
 
     document.getElementById("save-query-btn").addEventListener("click", async () => {
@@ -688,14 +732,18 @@ CREATE TABLE refunds (
     dom.joinsList.addEventListener("change", handleDynamicChange);
     dom.metricsList.addEventListener("change", handleDynamicChange);
     dom.filtersList.addEventListener("change", handleDynamicChange);
+    dom.havingFiltersList.addEventListener("change", handleDynamicChange);
     dom.metricsList.addEventListener("input", handleFieldSearchInput);
     dom.filtersList.addEventListener("input", handleFieldSearchInput);
+    dom.havingFiltersList.addEventListener("input", handleFieldSearchInput);
     dom.metricsList.addEventListener("focusin", handleFieldSearchInput);
     dom.filtersList.addEventListener("focusin", handleFieldSearchInput);
+    dom.havingFiltersList.addEventListener("focusin", handleFieldSearchInput);
 
     dom.joinsList.addEventListener("click", handleDynamicClick);
     dom.metricsList.addEventListener("click", handleDynamicClick);
     dom.filtersList.addEventListener("click", handleDynamicClick);
+    dom.havingFiltersList.addEventListener("click", handleDynamicClick);
     dom.savedQueriesList.addEventListener("click", async (event) => {
       await handleSavedQueryClick(event);
     });
@@ -945,6 +993,7 @@ CREATE TABLE refunds (
   function handleDynamicChange(event) {
     const target = event.target;
     const rowIndex = Number(target.dataset.index);
+    const filterCollection = target.dataset.filterScope === "having" ? state.havingFilters : state.filters;
 
     if (target.matches("[data-join-condition-field]")) {
       const key = target.dataset.joinConditionField;
@@ -984,18 +1033,32 @@ CREATE TABLE refunds (
 
     if (target.matches("[data-filter-field]")) {
       const key = target.dataset.filterField;
-      state.filters[rowIndex][key] =
-        key === "field" ? normalizeFieldInput(target.value) : target.value;
+      filterCollection[rowIndex][key] =
+        key === "field"
+          ? normalizeFieldInput(
+              target.value,
+              target.dataset.filterScope === "having" ? getHavingFields() : undefined
+            )
+          : target.value;
       render();
       return;
     }
 
     if (target.matches("[data-filter-config]")) {
       const key = target.dataset.filterConfig;
+      const scope = target.dataset.filterScope || "where";
       if (key === "conditionOperator") {
-        state.filterConditionOperator = normalizeLogicalOperator(target.value);
+        if (scope === "having") {
+          state.havingConditionOperator = normalizeLogicalOperator(target.value);
+        } else {
+          state.filterConditionOperator = normalizeLogicalOperator(target.value);
+        }
       } else if (key === "groupOperator") {
-        state.filterGroupOperator = normalizeLogicalOperator(target.value);
+        if (scope === "having") {
+          state.havingGroupOperator = normalizeLogicalOperator(target.value);
+        } else {
+          state.filterGroupOperator = normalizeLogicalOperator(target.value);
+        }
       }
       render();
     }
@@ -1024,10 +1087,11 @@ CREATE TABLE refunds (
     const filterFieldTag = event.target.closest("[data-pick-filter-field]");
     if (filterFieldTag) {
       const index = Number(filterFieldTag.dataset.index);
-      if (!state.filters[index]) {
+      const collection = filterFieldTag.dataset.filterScope === "having" ? state.havingFilters : state.filters;
+      if (!collection[index]) {
         return;
       }
-      state.filters[index].field = filterFieldTag.dataset.field || "";
+      collection[index].field = filterFieldTag.dataset.field || "";
       render();
       return;
     }
@@ -1085,7 +1149,9 @@ CREATE TABLE refunds (
 
     const addFilterToGroupButton = event.target.closest("[data-add-filter-to-group]");
     if (addFilterToGroupButton) {
-      state.filters.push(createDefaultFilter(addFilterToGroupButton.dataset.groupId || "1"));
+      const collection =
+        addFilterToGroupButton.dataset.filterScope === "having" ? state.havingFilters : state.filters;
+      collection.push(createDefaultFilter(addFilterToGroupButton.dataset.groupId || "1"));
       render();
       return;
     }
@@ -1105,7 +1171,10 @@ CREATE TABLE refunds (
     if (!target.matches("[data-metric-field='field'], [data-filter-field='field']")) {
       return;
     }
-    updateFieldSearchOptions(target, getAvailableFields());
+    updateFieldSearchOptions(
+      target,
+      target.dataset.filterScope === "having" ? getHavingFields() : getAvailableFields()
+    );
   }
 
   function focusSavedQueriesPanel() {
@@ -1130,14 +1199,17 @@ CREATE TABLE refunds (
     }
   }
 
-  function handleExecuteSqlPreview() {
+  function handleValidateSqlSyntax() {
     const previewPanel = dom.sqlOutput.closest(".preview-panel");
     previewPanel?.scrollIntoView({ behavior: "smooth", block: "nearest" });
     flashPanel(previewPanel);
-    pushSqlStatus(
-      "info",
-      "当前没有真实数据库连接，“立即执行”会刷新并定位到 SQL 预览；请复制 SQL 后到目标平台执行。"
-    );
+    const sql = getCurrentSqlText();
+    const result = parseSelectSqlAst(sql);
+    if (result.ok) {
+      pushSqlStatus("success", `AST 语法检查通过：${describeSqlAst(result.ast)}。未连接真实数据库，不执行 SQL。`);
+      return;
+    }
+    pushSqlStatus("error", `AST 语法检查失败：${result.error}`);
   }
 
   function flashPanel(panel) {
@@ -1147,6 +1219,383 @@ CREATE TABLE refunds (
     panel.classList.remove("attention-flash");
     void panel.offsetWidth;
     panel.classList.add("attention-flash");
+  }
+
+  function parseSelectSqlAst(sql) {
+    const text = String(sql || "").trim();
+    if (!text || text.startsWith("--")) {
+      return { ok: false, error: "当前没有可检查的 SQL。" };
+    }
+
+    const semicolonCheck = validateStatementSemicolon(text);
+    if (!semicolonCheck.ok) {
+      return semicolonCheck;
+    }
+
+    const body = text.replace(/;\s*$/, "").trim();
+    const scan = scanSqlStructure(body);
+    if (!scan.ok) {
+      return scan;
+    }
+    const caseCheck = validateCaseExpressionBalance(body);
+    if (!caseCheck.ok) {
+      return caseCheck;
+    }
+
+    if (!/^select\b/i.test(body)) {
+      return { ok: false, error: "只支持检查 SELECT 查询。" };
+    }
+
+    const clauses = findTopLevelSqlClauses(body);
+    const fromClause = clauses.find((clause) => clause.key === "from");
+    if (!fromClause) {
+      return { ok: false, error: "缺少 FROM 子句。" };
+    }
+
+    const invalidOrder = findInvalidClauseOrder(clauses);
+    if (invalidOrder) {
+      return { ok: false, error: `${invalidOrder} 子句顺序不正确。` };
+    }
+
+    const selectBody = body.slice("select".length, fromClause.index).trim();
+    if (!selectBody) {
+      return { ok: false, error: "SELECT 后没有输出字段。" };
+    }
+
+    const ast = {
+      type: "select",
+      selectItems: splitTopLevel(selectBody, ",").filter(Boolean),
+      joins: [],
+      hasWhere: clauses.some((clause) => clause.key === "where"),
+      groupItems: [],
+      having: "",
+      orderBy: "",
+      limit: "",
+      offset: "",
+    };
+
+    if (!ast.selectItems.length) {
+      return { ok: false, error: "SELECT 字段列表为空。" };
+    }
+
+    const fromEnd = getClauseEndIndex(clauses, fromClause);
+    const fromBody = body.slice(fromClause.index + fromClause.keyword.length, fromEnd).trim();
+    if (!fromBody) {
+      return { ok: false, error: "FROM 后没有查询表。" };
+    }
+
+    const joinCheck = parseJoinAst(fromBody);
+    if (!joinCheck.ok) {
+      return joinCheck;
+    }
+    ast.from = joinCheck.from;
+    ast.joins = joinCheck.joins;
+
+    const whereClause = clauses.find((clause) => clause.key === "where");
+    if (whereClause) {
+      const whereBody = body.slice(whereClause.index + whereClause.keyword.length, getClauseEndIndex(clauses, whereClause)).trim();
+      if (!whereBody) {
+        return { ok: false, error: "WHERE 后没有过滤条件。" };
+      }
+      ast.where = whereBody;
+    }
+
+    const groupClause = clauses.find((clause) => clause.key === "group");
+    if (groupClause) {
+      const groupBody = body.slice(groupClause.index + groupClause.keyword.length, getClauseEndIndex(clauses, groupClause)).trim();
+      ast.groupItems = splitTopLevel(groupBody, ",").filter(Boolean);
+      if (!ast.groupItems.length) {
+        return { ok: false, error: "GROUP BY 后没有分组字段。" };
+      }
+    }
+
+    const havingClause = clauses.find((clause) => clause.key === "having");
+    if (havingClause) {
+      ast.having = body.slice(havingClause.index + havingClause.keyword.length, getClauseEndIndex(clauses, havingClause)).trim();
+      if (!ast.having) {
+        return { ok: false, error: "HAVING 后没有过滤条件。" };
+      }
+    }
+
+    const orderClause = clauses.find((clause) => clause.key === "order");
+    if (orderClause) {
+      ast.orderBy = body.slice(orderClause.index + orderClause.keyword.length, getClauseEndIndex(clauses, orderClause)).trim();
+      if (!ast.orderBy) {
+        return { ok: false, error: "ORDER BY 后没有排序字段。" };
+      }
+    }
+
+    const limitClause = clauses.find((clause) => clause.key === "limit");
+    if (limitClause) {
+      ast.limit = body.slice(limitClause.index + limitClause.keyword.length, getClauseEndIndex(clauses, limitClause)).trim();
+      if (!/^\d+$/i.test(ast.limit)) {
+        return { ok: false, error: "LIMIT 只支持正整数。" };
+      }
+    }
+
+    const offsetClause = clauses.find((clause) => clause.key === "offset");
+    if (offsetClause) {
+      ast.offset = body.slice(offsetClause.index + offsetClause.keyword.length, getClauseEndIndex(clauses, offsetClause)).trim();
+      if (!/^\d+$/i.test(ast.offset)) {
+        return { ok: false, error: "OFFSET 只支持大于等于 0 的整数。" };
+      }
+    }
+
+    return { ok: true, ast };
+  }
+
+  function validateStatementSemicolon(sql) {
+    let quote = "";
+    for (let index = 0; index < sql.length; index += 1) {
+      const char = sql[index];
+      const prev = sql[index - 1];
+      if ((char === "'" || char === '"' || char === "`") && prev !== "\\") {
+        quote = quote === char ? "" : quote || char;
+      }
+      if (!quote && char === ";" && sql.slice(index + 1).trim()) {
+        return { ok: false, error: "只允许一条 SQL；分号只能出现在末尾。" };
+      }
+    }
+    return { ok: true };
+  }
+
+  function scanSqlStructure(sql) {
+    let quote = "";
+    let depth = 0;
+    for (let index = 0; index < sql.length; index += 1) {
+      const char = sql[index];
+      const prev = sql[index - 1];
+      if ((char === "'" || char === '"' || char === "`") && prev !== "\\") {
+        quote = quote === char ? "" : quote || char;
+        continue;
+      }
+      if (quote) {
+        continue;
+      }
+      if (char === "(") {
+        depth += 1;
+      } else if (char === ")") {
+        depth -= 1;
+        if (depth < 0) {
+          return { ok: false, error: "右括号多于左括号。" };
+        }
+      }
+    }
+    if (quote) {
+      return { ok: false, error: "字符串或标识符引用没有闭合。" };
+    }
+    if (depth !== 0) {
+      return { ok: false, error: "括号没有闭合。" };
+    }
+    return { ok: true };
+  }
+
+  function validateCaseExpressionBalance(sql) {
+    const tokens = tokenizeSqlWords(sql);
+    let depth = 0;
+    for (const token of tokens) {
+      if (token === "case") {
+        depth += 1;
+      } else if (token === "end") {
+        depth -= 1;
+        if (depth < 0) {
+          return { ok: false, error: "CASE 表达式 END 多于 CASE。" };
+        }
+      }
+    }
+    if (depth > 0) {
+      return { ok: false, error: "CASE 表达式缺少 END。" };
+    }
+    return { ok: true };
+  }
+
+  function tokenizeSqlWords(sql) {
+    const words = [];
+    let quote = "";
+    let current = "";
+    for (let index = 0; index < sql.length; index += 1) {
+      const char = sql[index];
+      const prev = sql[index - 1];
+      if ((char === "'" || char === '"' || char === "`") && prev !== "\\") {
+        if (quote === char) {
+          quote = "";
+        } else if (!quote) {
+          quote = char;
+        }
+        continue;
+      }
+      if (quote) {
+        continue;
+      }
+      if (/[A-Za-z_]/.test(char)) {
+        current += char.toLowerCase();
+      } else if (current) {
+        words.push(current);
+        current = "";
+      }
+    }
+    if (current) {
+      words.push(current);
+    }
+    return words;
+  }
+
+  function findTopLevelSqlClauses(sql) {
+    const clauseDefs = [
+      { key: "from", keyword: "FROM" },
+      { key: "where", keyword: "WHERE" },
+      { key: "group", keyword: "GROUP BY" },
+      { key: "having", keyword: "HAVING" },
+      { key: "order", keyword: "ORDER BY" },
+      { key: "limit", keyword: "LIMIT" },
+      { key: "offset", keyword: "OFFSET" },
+    ];
+    const clauses = [];
+    let quote = "";
+    let depth = 0;
+    const lowerSql = sql.toLowerCase();
+
+    for (let index = 0; index < sql.length; index += 1) {
+      const char = sql[index];
+      const prev = sql[index - 1];
+      if ((char === "'" || char === '"' || char === "`") && prev !== "\\") {
+        quote = quote === char ? "" : quote || char;
+      }
+      if (quote) {
+        continue;
+      }
+      if (char === "(") {
+        depth += 1;
+        continue;
+      }
+      if (char === ")") {
+        depth -= 1;
+        continue;
+      }
+      if (depth !== 0) {
+        continue;
+      }
+      const match = clauseDefs.find((clause) => isSqlKeywordAt(lowerSql, clause.keyword.toLowerCase(), index));
+      if (match && !clauses.some((clause) => clause.key === match.key)) {
+        clauses.push({ ...match, index });
+      }
+    }
+
+    return clauses.sort((left, right) => left.index - right.index);
+  }
+
+  function isSqlKeywordAt(lowerSql, keyword, index) {
+    if (!lowerSql.startsWith(keyword, index)) {
+      return false;
+    }
+    const before = lowerSql[index - 1] || " ";
+    const after = lowerSql[index + keyword.length] || " ";
+    return !/[a-z0-9_]/.test(before) && !/[a-z0-9_]/.test(after);
+  }
+
+  function findInvalidClauseOrder(clauses) {
+    const order = ["from", "where", "group", "having", "order", "limit", "offset"];
+    let last = -1;
+    for (const clause of clauses) {
+      const current = order.indexOf(clause.key);
+      if (current < last) {
+        return clause.keyword;
+      }
+      last = current;
+    }
+    return "";
+  }
+
+  function getClauseEndIndex(clauses, clause) {
+    const next = clauses.find((item) => item.index > clause.index);
+    return next ? next.index : Number.MAX_SAFE_INTEGER;
+  }
+
+  function parseJoinAst(fromBody) {
+    const joinRegex = /\b(left|right|inner|full|cross)?\s*join\b/gi;
+    const matches = Array.from(fromBody.matchAll(joinRegex));
+    if (!matches.length) {
+      return { ok: true, from: fromBody.trim(), joins: [] };
+    }
+
+    const baseFrom = fromBody.slice(0, matches[0].index).trim();
+    if (!baseFrom) {
+      return { ok: false, error: "JOIN 前缺少基表。" };
+    }
+
+    const joins = [];
+    for (let index = 0; index < matches.length; index += 1) {
+      const match = matches[index];
+      const nextIndex = matches[index + 1]?.index ?? fromBody.length;
+      const segment = fromBody.slice(match.index, nextIndex).trim();
+      const onIndex = findTopLevelKeywordIndex(segment, "on");
+      if (onIndex === -1 && !/^cross\s+join\b/i.test(segment)) {
+        return { ok: false, error: `第 ${index + 1} 个 JOIN 缺少 ON 条件。` };
+      }
+      const tablePart = onIndex === -1 ? segment.replace(/^(left|right|inner|full|cross)?\s*join\b/i, "").trim() : segment.slice(0, onIndex).replace(/^(left|right|inner|full|cross)?\s*join\b/i, "").trim();
+      if (!tablePart) {
+        return { ok: false, error: `第 ${index + 1} 个 JOIN 缺少右表。` };
+      }
+      const onPart = onIndex === -1 ? "" : segment.slice(onIndex + 2).trim();
+      if (onIndex !== -1 && !onPart) {
+        return { ok: false, error: `第 ${index + 1} 个 JOIN 的 ON 条件为空。` };
+      }
+      joins.push({ table: tablePart, on: onPart });
+    }
+
+    return { ok: true, from: baseFrom, joins };
+  }
+
+  function findTopLevelKeywordIndex(input, keyword) {
+    let quote = "";
+    let depth = 0;
+    const lowerInput = input.toLowerCase();
+    for (let index = 0; index < input.length; index += 1) {
+      const char = input[index];
+      const prev = input[index - 1];
+      if ((char === "'" || char === '"' || char === "`") && prev !== "\\") {
+        quote = quote === char ? "" : quote || char;
+      }
+      if (quote) {
+        continue;
+      }
+      if (char === "(") {
+        depth += 1;
+        continue;
+      }
+      if (char === ")") {
+        depth -= 1;
+        continue;
+      }
+      if (depth === 0 && isSqlKeywordAt(lowerInput, keyword.toLowerCase(), index)) {
+        return index;
+      }
+    }
+    return -1;
+  }
+
+  function describeSqlAst(ast) {
+    const parts = [`${ast.selectItems.length} 个输出项`, `${ast.joins.length} 个 JOIN`];
+    if (ast.hasWhere) {
+      parts.push("包含 WHERE");
+    }
+    if (ast.groupItems.length) {
+      parts.push(`${ast.groupItems.length} 个 GROUP BY 字段`);
+    }
+    if (ast.having) {
+      parts.push("包含 HAVING");
+    }
+    if (ast.limit) {
+      parts.push(`LIMIT ${ast.limit}`);
+    }
+    if (ast.offset) {
+      parts.push(`OFFSET ${ast.offset}`);
+    }
+    return parts.join(" · ");
+  }
+
+  function getCurrentSqlText() {
+    return "value" in dom.sqlOutput ? dom.sqlOutput.value || "" : dom.sqlOutput.textContent || "";
   }
 
   async function handleSavedQueryClick(event) {
@@ -1198,8 +1647,8 @@ CREATE TABLE refunds (
     render();
   }
 
-  function normalizeFieldInput(raw) {
-    const match = findFieldMatch(raw);
+  function normalizeFieldInput(raw, fields) {
+    const match = findFieldMatch(raw, fields);
     return match ? match.id : raw.trim();
   }
 
@@ -1280,10 +1729,10 @@ CREATE TABLE refunds (
     return option ? option.label : value;
   }
 
-  function findFieldMatch(raw) {
+  function findFieldMatch(raw, fields) {
     const normalized = String(raw || "").trim().toLowerCase();
     const shortNormalized = normalizeFieldSearchText(raw);
-    const availableFields = getAvailableFields();
+    const availableFields = fields || getAvailableFields();
 
     const exact = availableFields.find(
       (field) =>
@@ -1353,8 +1802,12 @@ CREATE TABLE refunds (
     state.filters = [];
     state.filterConditionOperator = "and";
     state.filterGroupOperator = "and";
+    state.havingFilters = [];
+    state.havingConditionOperator = "and";
+    state.havingGroupOperator = "and";
     state.sort = { field: "", dir: "desc" };
     state.limit = "100";
+    state.offset = "";
   }
 
   function resetSchemaBrowserState() {
@@ -1374,6 +1827,7 @@ CREATE TABLE refunds (
     renderDimensionPicker();
     renderMetrics();
     renderFilters();
+    renderHavingFilters();
     renderSortControls();
     renderPreview();
     renderSavedQueries();
@@ -1482,8 +1936,28 @@ CREATE TABLE refunds (
       }))
       .filter((filter) => !filter.field || availableFieldIds.has(filter.field));
 
+    const havingFieldIds = new Set(getHavingFields().map((field) => field.id));
+    state.havingFilters = state.havingFilters
+      .map((filter) => ({
+        field: filter.field || "",
+        operator: OPERATORS.some((item) => item.value === filter.operator)
+          ? filter.operator
+          : "=",
+        value: filter.value || "",
+        valueTo: filter.valueTo || "",
+        groupId: normalizeGroupId(filter.groupId),
+      }))
+      .filter((filter) => !filter.field || havingFieldIds.has(filter.field));
+
     state.filterConditionOperator = normalizeLogicalOperator(state.filterConditionOperator);
     state.filterGroupOperator = normalizeLogicalOperator(state.filterGroupOperator);
+    state.havingConditionOperator = normalizeLogicalOperator(state.havingConditionOperator);
+    state.havingGroupOperator = normalizeLogicalOperator(state.havingGroupOperator);
+    state.sqlDialect = normalizeSqlDialect(state.sqlDialect);
+    state.sqlStrictMode = state.sqlStrictMode !== false;
+    if (!Number.isFinite(Number(state.offset)) || Number(state.offset) < 0) {
+      state.offset = "";
+    }
 
     const sortOptions = getSortOptions();
     if (!sortOptions.some((option) => option.value === state.sort.field)) {
@@ -2020,29 +2494,68 @@ CREATE TABLE refunds (
         })}
       </div>
       ${groupIndexedConditions(state.filters)
-        .map((group, groupIndex) => renderFilterGroup(group, groupIndex, availableFields))
+        .map((group, groupIndex) => renderFilterGroup(group, groupIndex, availableFields, "where"))
         .join("")}
     `;
   }
 
-  function renderFilterGroup(group, groupIndex, availableFields) {
+  function renderHavingFilters() {
+    const availableFields = getHavingFields();
+
+    if (state.template === "detail") {
+      dom.havingFiltersList.className = "rows-list empty-state";
+      dom.havingFiltersList.textContent = "HAVING 仅用于聚合查询；明细查询请使用 WHERE。";
+      return;
+    }
+
+    if (!state.havingFilters.length) {
+      dom.havingFiltersList.className = "rows-list empty-state";
+      dom.havingFiltersList.textContent = "还没有 HAVING 条件，点“新增 Having 条件”开始配置。";
+      return;
+    }
+
+    dom.havingFiltersList.className = "rows-list";
+    dom.havingFiltersList.innerHTML = `
+      <div class="condition-toolbar">
+        ${renderFilterConfigSelect({
+          label: "组内关系",
+          dataField: "conditionOperator",
+          value: state.havingConditionOperator,
+          scope: "having",
+        })}
+        ${renderFilterConfigSelect({
+          label: "组间关系",
+          dataField: "groupOperator",
+          value: state.havingGroupOperator,
+          scope: "having",
+        })}
+      </div>
+      ${groupIndexedConditions(state.havingFilters)
+        .map((group, groupIndex) => renderFilterGroup(group, groupIndex, availableFields, "having"))
+        .join("")}
+    `;
+  }
+
+  function renderFilterGroup(group, groupIndex, availableFields, scope) {
+    const conditionOperator =
+      scope === "having" ? state.havingConditionOperator : state.filterConditionOperator;
     return `
       <div class="condition-group">
         <div class="condition-group-head">
           <strong>条件组 ${groupIndex + 1}</strong>
-          <span>组内 ${escapeHtml(state.filterConditionOperator.toUpperCase())}</span>
+          <span>组内 ${escapeHtml(conditionOperator.toUpperCase())}</span>
         </div>
         ${group.items
-          .map(({ item: filter, index }) => renderFilterRow(filter, index, availableFields))
+          .map(({ item: filter, index }) => renderFilterRow(filter, index, availableFields, scope))
           .join("")}
         <div class="inline-actions">
-          <button data-add-filter-to-group data-group-id="${escapeAttr(group.id)}">本组新增条件</button>
+          <button data-add-filter-to-group data-filter-scope="${escapeAttr(scope)}" data-group-id="${escapeAttr(group.id)}">本组新增条件</button>
         </div>
       </div>
     `;
   }
 
-  function renderFilterRow(filter, index, availableFields) {
+  function renderFilterRow(filter, index, availableFields, scope) {
     const needsSecondValue = filter.operator === "between";
     const skipsValue = filter.operator === "is_null" || filter.operator === "is_not_null";
     return `
@@ -2055,15 +2568,17 @@ CREATE TABLE refunds (
           options: getFieldSuggestionLabels(getFieldDisplayValue(filter.field), availableFields),
           placeholder: "输入字段名",
           type: "filter",
-          listId: `filter-field-options-${index}`,
+          listId: `${scope}-filter-field-options-${index}`,
           quickFields: availableFields,
           selectedFieldId: filter.field,
+          scope,
         })}
         ${renderSelectField({
           label: "操作符",
           value: filter.operator,
           dataField: "operator",
           index,
+          scope,
           options: OPERATORS.map((operator) => ({
             value: operator.value,
             label: operator.label,
@@ -2075,6 +2590,7 @@ CREATE TABLE refunds (
           <input
             type="text"
             data-filter-field="value"
+            data-filter-scope="${escapeAttr(scope)}"
             data-index="${index}"
             value="${escapeAttr(filter.value)}"
             placeholder="${skipsValue ? "该操作符无需输入值" : "例如：paid, 100, 2026-04-01"}"
@@ -2088,14 +2604,15 @@ CREATE TABLE refunds (
               ? `<input
                   type="text"
                   data-filter-field="valueTo"
+                  data-filter-scope="${escapeAttr(scope)}"
                   data-index="${index}"
                   value="${escapeAttr(filter.valueTo)}"
                   placeholder="例如：2026-04-30"
                 />`
-              : `<input value="${escapeAttr(getFieldById(filter.field)?.kind || "")}" readonly />`
+              : `<input value="${escapeAttr(getFilterFieldKind(filter.field, availableFields))}" readonly />`
           }
         </label>
-        <button class="icon-button" data-remove-row="filters" data-index="${index}">删除</button>
+        <button class="icon-button" data-remove-row="${scope === "having" ? "havingFilters" : "filters"}" data-index="${index}">删除</button>
       </div>
     `;
   }
@@ -2104,12 +2621,16 @@ CREATE TABLE refunds (
     return `
       <label class="field">
         <span>${escapeHtml(config.label)}</span>
-        <select data-filter-config="${escapeAttr(config.dataField)}">
+        <select data-filter-config="${escapeAttr(config.dataField)}" data-filter-scope="${escapeAttr(config.scope || "where")}">
           <option value="and" ${config.value === "and" ? "selected" : ""}>AND</option>
           <option value="or" ${config.value === "or" ? "selected" : ""}>OR</option>
         </select>
       </label>
     `;
+  }
+
+  function getFilterFieldKind(fieldId, availableFields) {
+    return (availableFields || []).find((field) => field.id === fieldId)?.kind || getFieldById(fieldId)?.kind || "";
   }
 
   function renderSortControls() {
@@ -2119,6 +2640,10 @@ CREATE TABLE refunds (
       .join("");
     dom.sortFieldInput.value = getSortDisplayValue(state.sort.field);
     dom.sortDirectionSelect.value = state.sort.dir;
+    dom.limitInput.value = state.limit;
+    dom.offsetInput.value = state.offset;
+    dom.sqlDialectSelect.value = normalizeSqlDialect(state.sqlDialect);
+    dom.sqlStrictModeInput.checked = Boolean(state.sqlStrictMode);
   }
 
   function renderPreview() {
@@ -2132,13 +2657,19 @@ CREATE TABLE refunds (
       filters: state.filters,
       filterConditionOperator: state.filterConditionOperator,
       filterGroupOperator: state.filterGroupOperator,
+      havingFilters: state.havingFilters,
+      havingConditionOperator: state.havingConditionOperator,
+      havingGroupOperator: state.havingGroupOperator,
       sort: state.sort,
       limit: state.limit,
+      offset: state.offset,
+      sqlDialect: state.sqlDialect,
+      sqlStrictMode: state.sqlStrictMode,
     });
     const aiResult = getRenderableAiResult();
 
     if (aiResult) {
-      dom.sqlOutput.textContent = aiResult.sql;
+      setSqlEditorValue(aiResult.sql, `ai:${aiResult.generatedAt || aiResult.title || ""}`);
       dom.querySummary.innerHTML = buildPreviewMeta([
         aiResult.modelName || buildModelLabel(getActiveModel()) || "未选择模型",
         `AI · ${describeProvider(aiResult.llmProvider || state.llmConfig.provider)} · ${aiResult.llmModel || state.llmConfig.model}`,
@@ -2153,17 +2684,41 @@ CREATE TABLE refunds (
       return;
     }
 
-    dom.sqlOutput.textContent = manualResult.sql;
+    setSqlEditorValue(manualResult.sql, buildManualSqlSourceKey(manualResult.sql));
     dom.querySummary.innerHTML = buildPreviewMeta([
       buildModelLabel(getActiveModel()) || "未选择模型",
       `${shortenText(state.baseTable || "未选择基表", 42)} · ${manualResult.resolvedJoins.length} Join`,
       `${templateTitle(state.template)} · ${describeSelectedDimensions()} · ${state.metrics.length} 指标`,
-      `${getSortDisplayValue(state.sort.field) || "未排序"}${state.limit ? ` · LIMIT ${state.limit}` : ""}`,
+      `${describeSqlDialect(state.sqlDialect)}${state.sqlStrictMode ? " · 严格" : ""}`,
     ]);
 
     renderSqlStatus(manualResult.messages);
     dom.aiResultStatus.textContent = state.aiLoading ? "AI 生成中..." : "当前显示手动生成结果";
     dom.aiResultStatus.className = state.aiLoading ? "status-chip" : "status-chip muted";
+  }
+
+  function setSqlEditorValue(sql, sourceKey) {
+    const nextSource = String(sourceKey || "");
+    if (state.sqlDraftSource !== nextSource) {
+      state.sqlDraft = sql;
+      state.sqlDraftSource = nextSource;
+    }
+    if (dom.sqlOutput.value !== state.sqlDraft) {
+      dom.sqlOutput.value = state.sqlDraft;
+    }
+  }
+
+  function buildManualSqlSourceKey(sql) {
+    return `manual:${hashText(sql)}`;
+  }
+
+  function hashText(text) {
+    let hash = 0;
+    const value = String(text || "");
+    for (let index = 0; index < value.length; index += 1) {
+      hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
+    }
+    return hash.toString(16);
   }
 
   function renderSavedQueries() {
@@ -2283,7 +2838,7 @@ CREATE TABLE refunds (
       return;
     }
     const current = Array.from(dom.sqlStatus.querySelectorAll(".status-item")).map((node) => ({
-      level: node.classList.contains("error") ? "error" : "info",
+      level: ["error", "warning", "success"].find((level) => node.classList.contains(level)) || "info",
       text: node.textContent || "",
     }));
     current.unshift({ level, text });
@@ -2301,8 +2856,14 @@ CREATE TABLE refunds (
       filters: clone(state.filters),
       filterConditionOperator: state.filterConditionOperator,
       filterGroupOperator: state.filterGroupOperator,
+      havingFilters: clone(state.havingFilters),
+      havingConditionOperator: state.havingConditionOperator,
+      havingGroupOperator: state.havingGroupOperator,
       sort: clone(state.sort),
       limit: state.limit,
+      offset: state.offset,
+      sqlDialect: state.sqlDialect,
+      sqlStrictMode: state.sqlStrictMode,
     };
   }
 
@@ -2325,8 +2886,14 @@ CREATE TABLE refunds (
     state.filters = clone(spec.filters || []);
     state.filterConditionOperator = normalizeLogicalOperator(spec.filterConditionOperator);
     state.filterGroupOperator = normalizeLogicalOperator(spec.filterGroupOperator);
+    state.havingFilters = clone(spec.havingFilters || []);
+    state.havingConditionOperator = normalizeLogicalOperator(spec.havingConditionOperator);
+    state.havingGroupOperator = normalizeLogicalOperator(spec.havingGroupOperator);
     state.sort = clone(spec.sort || { field: "", dir: "desc" });
     state.limit = String(spec.limit || "100");
+    state.offset = String(spec.offset || "");
+    state.sqlDialect = normalizeSqlDialect(spec.sqlDialect);
+    state.sqlStrictMode = typeof spec.sqlStrictMode === "boolean" ? spec.sqlStrictMode : true;
     reconcileState();
     void persistModels();
     return true;
@@ -2374,6 +2941,29 @@ CREATE TABLE refunds (
         id: `${tableName}.${column.name}`,
       }))
     );
+  }
+
+  function getHavingFields() {
+    const dimensionFields = state.selectedDimensions
+      .map((fieldId) => getFieldById(fieldId))
+      .filter(Boolean);
+    const metricFields = state.metrics
+      .filter((metric) => metric.field)
+      .map((metric) => {
+        const sourceField = getFieldById(metric.field);
+        const alias = metricAlias(metric, sourceField);
+        return {
+          name: alias,
+          type: "METRIC",
+          kind: "number",
+          table: "__metrics__",
+          id: `metric:${alias}`,
+          metric,
+          comment: sourceField ? `${metric.func.toUpperCase()}(${sourceField.name})` : alias,
+        };
+      })
+      .filter((field) => field.name);
+    return [...dimensionFields, ...metricFields];
   }
 
   function getFieldDisplayValue(fieldId) {
@@ -2596,6 +3186,10 @@ CREATE TABLE refunds (
   }
 
   function buildJoinOnClause(join, conditions) {
+    return buildJoinOnClauseWithContext(join, conditions, null);
+  }
+
+  function buildJoinOnClauseWithContext(join, conditions, context) {
     const innerOperator = normalizeLogicalOperator(join?.conditionOperator).toUpperCase();
     const groupOperator = normalizeLogicalOperator(join?.conditionGroupOperator).toUpperCase();
     const groups = groupConditions(conditions);
@@ -2604,7 +3198,12 @@ CREATE TABLE refunds (
         const clause = group.items
           .map(
             (condition) =>
-              `${join.leftTable}.${condition.leftField} = ${join.rightTable}.${condition.rightField}`
+              `${formatTableColumn(join.leftTable, condition.leftField, context, true)} = ${formatTableColumn(
+                join.rightTable,
+                condition.rightField,
+                context,
+                true
+              )}`
           )
           .join(` ${innerOperator} `);
         return groups.length > 1 || group.items.length > 1 ? `(${clause})` : clause;
@@ -2658,6 +3257,24 @@ CREATE TABLE refunds (
     return value === "or" ? "or" : "and";
   }
 
+  function normalizeSqlDialect(value) {
+    return SQL_DIALECTS.includes(value) ? value : EMPTY_STATE.sqlDialect;
+  }
+
+  function describeSqlDialect(value) {
+    const dialect = normalizeSqlDialect(value);
+    if (dialect === "hive") {
+      return "Hive / Spark";
+    }
+    if (dialect === "mysql") {
+      return "MySQL";
+    }
+    if (dialect === "presto") {
+      return "Presto / Trino";
+    }
+    return "通用 SQL";
+  }
+
   function normalizeGroupId(value) {
     const text = String(value || "1").trim();
     return text || "1";
@@ -2699,6 +3316,14 @@ CREATE TABLE refunds (
 
   function createNextFilterGroupId() {
     return createNextGroupId(state.filters);
+  }
+
+  function getLastHavingGroupId() {
+    return normalizeGroupId(state.havingFilters[state.havingFilters.length - 1]?.groupId);
+  }
+
+  function createNextHavingGroupId() {
+    return createNextGroupId(state.havingFilters);
   }
 
   function getLastJoinGroupId(join) {
@@ -2850,7 +3475,7 @@ CREATE TABLE refunds (
   }
 
   function renderSelectField(config) {
-    const { label, value, dataField, index, options, type } = config;
+    const { label, value, dataField, index, options, type, scope } = config;
     const attribute =
       type === "join"
         ? "data-join-field"
@@ -2861,7 +3486,9 @@ CREATE TABLE refunds (
     return `
       <label class="field">
         <span>${escapeHtml(label)}</span>
-        <select ${attribute}="${escapeAttr(dataField)}" data-index="${index}">
+        <select ${attribute}="${escapeAttr(dataField)}" data-index="${index}" ${
+          type === "filter" ? `data-filter-scope="${escapeAttr(scope || "where")}"` : ""
+        }>
           <option value="">请选择</option>
           ${options
             .map(
@@ -2878,7 +3505,7 @@ CREATE TABLE refunds (
   }
 
   function renderSearchInputField(config) {
-    const { label, value, dataField, index, options, type, listId, placeholder, quickFields, selectedFieldId } = config;
+    const { label, value, dataField, index, options, type, listId, placeholder, quickFields, selectedFieldId, scope } = config;
     const attribute =
       type === "join"
         ? "data-join-field"
@@ -2894,6 +3521,7 @@ CREATE TABLE refunds (
           list="${escapeAttr(listId)}"
           ${attribute}="${escapeAttr(dataField)}"
           data-index="${index}"
+          ${type === "filter" ? `data-filter-scope="${escapeAttr(scope || "where")}"` : ""}
           value="${escapeAttr(value)}"
           placeholder="${escapeAttr(placeholder || "输入后选择")}"
         />
@@ -2907,6 +3535,7 @@ CREATE TABLE refunds (
           selectedFieldId,
           mode: "filter",
           index,
+          scope,
         }) : ""}
       </label>
     `;
@@ -2965,7 +3594,7 @@ CREATE TABLE refunds (
     const selected = config.selectedFieldId === fieldId;
     const attrs =
       config.mode === "filter"
-        ? `data-pick-filter-field data-index="${config.index}" data-field="${escapeAttr(field.id)}"`
+        ? `data-pick-filter-field data-filter-scope="${escapeAttr(config.scope || "where")}" data-index="${config.index}" data-field="${escapeAttr(field.id)}"`
         : `data-pick-join-condition-field="${escapeAttr(config.dataField)}" data-index="${config.index}" data-condition-index="${config.conditionIndex}" data-field="${escapeAttr(field.name)}"`;
     return `
       <button
@@ -3001,6 +3630,7 @@ CREATE TABLE refunds (
     }
 
     const resolvedJoins = resolveJoinsFromSpec(spec);
+    const sqlContext = createSqlRenderContext(spec, resolvedJoins);
     const availableFields = collectFieldsFromSpec(spec, resolvedJoins);
     const fieldMap = new Map(availableFields.map((field) => [field.id, field]));
     const selectParts = [];
@@ -3013,7 +3643,7 @@ CREATE TABLE refunds (
       if (dimensions.length) {
         dimensions.forEach((fieldId) => {
           const field = fieldMap.get(fieldId);
-          selectParts.push(formatQueryColumn(field));
+          selectParts.push(formatQueryColumn(field, sqlContext));
         });
       } else {
         selectParts.push("*");
@@ -3025,8 +3655,8 @@ CREATE TABLE refunds (
     } else {
       dimensions.forEach((fieldId) => {
         const field = fieldMap.get(fieldId);
-        selectParts.push(formatQueryColumn(field));
-        groupByParts.push(formatQueryColumn(field));
+        selectParts.push(formatQueryColumn(field, sqlContext));
+        groupByParts.push(formatQueryColumn(field, sqlContext));
       });
 
       if (!metrics.length) {
@@ -3039,23 +3669,43 @@ CREATE TABLE refunds (
       metrics.forEach((metric) => {
         const field = fieldMap.get(metric.field);
         const alias = metricAlias(metric, field);
-        selectParts.push(`${toMetricExpression(metric.func, field)} AS ${alias}`);
+        selectParts.push(
+          `${toMetricExpression(metric.func, field, sqlContext)} AS ${formatAlias(alias, sqlContext)}`
+        );
       });
     }
 
     const whereClause = renderWhereClause(spec.filters || [], fieldMap, {
       conditionOperator: spec.filterConditionOperator,
       groupOperator: spec.filterGroupOperator,
+      context: sqlContext,
+      messages,
     });
+    const havingFieldMap = buildHavingFieldMap(spec, fieldMap, metrics);
+    const havingClause = renderWhereClause(spec.havingFilters || [], havingFieldMap, {
+      conditionOperator: spec.havingConditionOperator,
+      groupOperator: spec.havingGroupOperator,
+      context: sqlContext,
+      messages,
+    });
+    if (havingClause && spec.template === "detail") {
+      messages.push({
+        level: "warning",
+        text: "明细查询不支持 HAVING，已忽略 HAVING 条件。",
+      });
+    }
 
     const lines = [];
     lines.push("SELECT");
     lines.push(selectParts.map((part) => `  ${part}`).join(",\n") || "  -- 请先选择字段或指标");
-    lines.push(`FROM ${spec.baseTable}`);
+    lines.push(`FROM ${formatTableReference(spec.baseTable, sqlContext)}`);
 
     resolvedJoins.forEach((join) => {
       lines.push(
-        `${join.joinType.toUpperCase()} JOIN ${join.rightTable} ON ${buildJoinOnClause(join, join.conditions)}`
+        `${join.joinType.toUpperCase()} JOIN ${formatTableReference(
+          join.rightTable,
+          sqlContext
+        )} ON ${buildJoinOnClauseWithContext(join, join.conditions, sqlContext)}`
       );
     });
 
@@ -3069,12 +3719,17 @@ CREATE TABLE refunds (
       lines.push(groupByParts.map((part) => `  ${part}`).join(",\n"));
     }
 
-    const sortClause = renderSortClause(spec.sort, fieldMap, metrics);
+    if (havingClause && spec.template !== "detail") {
+      lines.push("HAVING");
+      lines.push(`  ${havingClause}`);
+    }
+
+    const sortClause = renderSortClause(spec.sort, fieldMap, metrics, sqlContext);
     if (sortClause) {
       lines.push(`ORDER BY ${sortClause}`);
     } else if (spec.template === "topn" && metrics.length) {
       const fallbackAlias = metricAlias(metrics[0], fieldMap.get(metrics[0].field));
-      lines.push(`ORDER BY ${fallbackAlias} DESC`);
+      lines.push(`ORDER BY ${formatAlias(fallbackAlias, sqlContext)} DESC`);
       messages.push({
         level: "info",
         text: `Top N 默认按 ${fallbackAlias} 倒序排序。`,
@@ -3082,7 +3737,7 @@ CREATE TABLE refunds (
     }
 
     const numericLimit = Number(spec.limit);
-    if (Number.isFinite(numericLimit) && numericLimit > 0) {
+    if (Number.isInteger(numericLimit) && numericLimit > 0) {
       lines.push(`LIMIT ${numericLimit}`);
     } else if (spec.template === "topn") {
       lines.push("LIMIT 10");
@@ -3092,10 +3747,27 @@ CREATE TABLE refunds (
       });
     }
 
+    const numericOffset = Number(spec.offset);
+    if (String(spec.offset || "").trim() && Number.isInteger(numericOffset) && numericOffset >= 0) {
+      lines.push(`OFFSET ${numericOffset}`);
+    } else if (String(spec.offset || "").trim()) {
+      messages.push({
+        level: "warning",
+        text: "OFFSET 只支持大于等于 0 的整数，已忽略。",
+      });
+    }
+
     if (!resolvedJoins.length && (spec.joins || []).length) {
       messages.push({
         level: "info",
         text: "部分 Join 配置不完整，已在生成 SQL 时忽略。",
+      });
+    }
+
+    if (!sqlContext.strict && resolvedJoins.length && hasAmbiguousColumnNames(availableFields)) {
+      messages.push({
+        level: "warning",
+        text: "当前关闭严格模式，且多表查询存在同名字段，部分字段可能在数据库中产生歧义。",
       });
     }
 
@@ -3174,8 +3846,45 @@ CREATE TABLE refunds (
     );
   }
 
-  function toMetricExpression(func, field) {
-    const column = formatQueryColumn(field);
+  function buildHavingFieldMap(spec, fieldMap, metrics) {
+    const havingFields = [];
+    (spec.dimensions || []).forEach((fieldId) => {
+      if (fieldMap.has(fieldId)) {
+        havingFields.push(fieldMap.get(fieldId));
+      }
+    });
+    metrics.forEach((metric) => {
+      const sourceField = fieldMap.get(metric.field);
+      const alias = metricAlias(metric, sourceField);
+      if (!alias) {
+        return;
+      }
+      havingFields.push({
+        name: alias,
+        type: "METRIC",
+        kind: "number",
+        table: "__metrics__",
+        id: `metric:${alias}`,
+      });
+    });
+    return new Map(havingFields.map((field) => [field.id, field]));
+  }
+
+  function createSqlRenderContext(spec, resolvedJoins) {
+    const dialect = normalizeSqlDialect(spec.sqlDialect);
+    const strict = spec.sqlStrictMode !== false;
+    const tables = [spec.baseTable, ...resolvedJoins.map((join) => join.rightTable)].filter(Boolean);
+    const tableAliases = new Map();
+    tables.forEach((tableName, index) => {
+      if (!tableAliases.has(tableName)) {
+        tableAliases.set(tableName, `t${index}`);
+      }
+    });
+    return { dialect, strict, tableAliases };
+  }
+
+  function toMetricExpression(func, field, context) {
+    const column = formatQueryColumn(field, context);
     if (func === "count") {
       return `COUNT(${column})`;
     }
@@ -3185,26 +3894,29 @@ CREATE TABLE refunds (
     return `${func.toUpperCase()}(${column})`;
   }
 
-  function renderSortClause(sort, fieldMap, metrics) {
+  function renderSortClause(sort, fieldMap, metrics, context) {
     if (!sort?.field) {
       return "";
     }
     const direction = sort.dir === "asc" ? "ASC" : "DESC";
 
     if (sort.field.startsWith("metric:")) {
-      return `${sort.field.replace("metric:", "")} ${direction}`;
+      return `${formatAlias(sort.field.replace("metric:", ""), context)} ${direction}`;
     }
 
     if (fieldMap.has(sort.field)) {
       const field = fieldMap.get(sort.field);
-      return `${formatQueryColumn(field)} ${direction}`;
+      return `${formatQueryColumn(field, context)} ${direction}`;
     }
 
     const matchingMetric = metrics.find(
       (metric) => metricAlias(metric, fieldMap.get(metric.field)) === sort.field
     );
     if (matchingMetric) {
-      return `${metricAlias(matchingMetric, fieldMap.get(matchingMetric.field))} ${direction}`;
+      return `${formatAlias(
+        metricAlias(matchingMetric, fieldMap.get(matchingMetric.field)),
+        context
+      )} ${direction}`;
     }
 
     return "";
@@ -3224,7 +3936,7 @@ CREATE TABLE refunds (
     const groups = groupedFilters
       .map((group) => {
         const clauses = group.items
-          .map((filter) => renderFilterClause(fieldMap.get(filter.field), filter))
+          .map((filter) => renderFilterClause(fieldMap.get(filter.field), filter, options))
           .filter(Boolean);
         if (!clauses.length) {
           return "";
@@ -3237,8 +3949,8 @@ CREATE TABLE refunds (
     return groups.join(` ${groupOperator} `);
   }
 
-  function renderFilterClause(field, filter) {
-    const column = formatQueryColumn(field);
+  function renderFilterClause(field, filter, options) {
+    const column = formatQueryColumn(field, options?.context);
     const operator = filter.operator;
 
     if (operator === "is_null") {
@@ -3253,6 +3965,12 @@ CREATE TABLE refunds (
       if (!filter.value || !filter.valueTo) {
         return "";
       }
+      if (
+        !validateFilterValue(field, filter.value, options) ||
+        !validateFilterValue(field, filter.valueTo, options)
+      ) {
+        return "";
+      }
       return `${column} BETWEEN ${formatValue(field, filter.value)} AND ${formatValue(field, filter.valueTo)}`;
     }
 
@@ -3264,6 +3982,7 @@ CREATE TABLE refunds (
         .split(",")
         .map((value) => value.trim())
         .filter(Boolean)
+        .filter((value) => validateFilterValue(field, value, options))
         .map((value) => formatValue(field, value));
       if (!parts.length) {
         return "";
@@ -3275,6 +3994,10 @@ CREATE TABLE refunds (
       return "";
     }
 
+    if (!validateFilterValue(field, filter.value, options)) {
+      return "";
+    }
+
     if (operator === "like") {
       return `${column} LIKE ${formatValue(field, filter.value)}`;
     }
@@ -3282,8 +4005,99 @@ CREATE TABLE refunds (
     return `${column} ${operator} ${formatValue(field, filter.value)}`;
   }
 
-  function formatQueryColumn(field) {
-    return field?.name || "";
+  function validateFilterValue(field, value, options) {
+    if (!field) {
+      return false;
+    }
+    if (field.kind === "number" && !isNumericLiteral(value)) {
+      options?.messages?.push({
+        level: "warning",
+        text: `字段 ${field.name} 是数值类型，过滤值「${shortenText(value, 32)}」不是合法数字，已忽略该条件。`,
+      });
+      return false;
+    }
+    if (field.kind === "boolean" && !/^(true|false|1|0)$/i.test(String(value).trim())) {
+      options?.messages?.push({
+        level: "warning",
+        text: `字段 ${field.name} 是布尔类型，过滤值「${shortenText(value, 32)}」不是 true/false/1/0，已忽略该条件。`,
+      });
+      return false;
+    }
+    return true;
+  }
+
+  function isNumericLiteral(value) {
+    return /^[-+]?(?:\d+\.?\d*|\.\d+)$/.test(String(value).trim());
+  }
+
+  function formatQueryColumn(field, context) {
+    if (!field) {
+      return "";
+    }
+    return formatTableColumn(field.table, field.name, context);
+  }
+
+  function formatTableColumn(tableName, columnName, context, forceTablePrefix = false) {
+    if (tableName === "__metrics__") {
+      return formatAlias(columnName, context);
+    }
+    if (!context) {
+      return forceTablePrefix && tableName ? `${tableName}.${columnName}` : columnName;
+    }
+    if (!context.strict) {
+      return forceTablePrefix && tableName ? `${tableName}.${columnName}` : columnName;
+    }
+    const alias = context.tableAliases?.get(tableName);
+    const column = quoteIdentifier(columnName, context.dialect);
+    return alias ? `${alias}.${column}` : column;
+  }
+
+  function formatTableReference(tableName, context) {
+    const table = quoteMultipartIdentifier(tableName, context?.dialect);
+    if (!context?.strict) {
+      return table;
+    }
+    const alias = context.tableAliases?.get(tableName);
+    return alias ? `${table} ${alias}` : table;
+  }
+
+  function formatAlias(alias, context) {
+    const cleanAlias = String(alias || "").trim();
+    if (!cleanAlias) {
+      return "";
+    }
+    if (!context?.strict || /^[A-Za-z_][A-Za-z0-9_]*$/.test(cleanAlias)) {
+      return cleanAlias;
+    }
+    return quoteIdentifier(cleanAlias, context.dialect);
+  }
+
+  function quoteMultipartIdentifier(value, dialect) {
+    return String(value || "")
+      .split(".")
+      .map((part) => quoteIdentifier(part, dialect))
+      .join(".");
+  }
+
+  function quoteIdentifier(value, dialect) {
+    const text = String(value || "").trim();
+    if (!text || normalizeSqlDialect(dialect) === "plain") {
+      return text;
+    }
+    const quoteChar = normalizeSqlDialect(dialect) === "presto" ? '"' : "`";
+    return `${quoteChar}${text.replaceAll(quoteChar, `${quoteChar}${quoteChar}`)}${quoteChar}`;
+  }
+
+  function hasAmbiguousColumnNames(fields) {
+    const seen = new Set();
+    return fields.some((field) => {
+      const key = field.name.toLowerCase();
+      if (seen.has(key)) {
+        return true;
+      }
+      seen.add(key);
+      return false;
+    });
   }
 
   function formatValue(field, rawValue) {
@@ -3292,7 +4106,7 @@ CREATE TABLE refunds (
       return value;
     }
     if (field.kind === "boolean") {
-      return /^true$/i.test(value) ? "TRUE" : "FALSE";
+      return /^(true|1)$/i.test(value) ? "TRUE" : "FALSE";
     }
     return `'${value.replace(/'/g, "''")}'`;
   }
@@ -3718,6 +4532,7 @@ CREATE TABLE refunds (
     splitStatements,
     parseCreateTableStatement,
     parseColumnDefinition,
+    parseSelectSqlAst,
     inferKind,
   };
 

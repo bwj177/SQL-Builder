@@ -21,7 +21,7 @@
             <button id="top-saved-queries-btn" type="button">我的模版 ▾</button>
             <div id="top-saved-queries-menu" class="template-menu" hidden></div>
           </div>
-          <button id="execute-sql-btn" class="primary" type="button">立即执行</button>
+          <button id="execute-sql-btn" class="primary" type="button">检查 SQL</button>
         </div>
       </header>
 
@@ -199,6 +199,19 @@
             <div id="filters-list" class="rows-list empty-state">
               在这里配置字段过滤条件。
             </div>
+            <div class="section-subhead">
+              <div>
+                <p class="section-kicker">Having</p>
+                <h3>聚合后过滤</h3>
+              </div>
+              <div class="inline-actions">
+                <button id="add-having-group-btn">新增 Having 组</button>
+                <button id="add-having-filter-btn">新增 Having 条件</button>
+              </div>
+            </div>
+            <div id="having-filters-list" class="rows-list empty-state">
+              聚合查询后可在这里配置 HAVING 条件。
+            </div>
           </section>
 
           <section class="panel compact-panel tab-panel" data-tab-panel="sort" hidden>
@@ -224,6 +237,10 @@
               <label class="field">
                 <span>限制行数</span>
                 <input id="limit-input" type="number" min="1" step="1" value="100" />
+              </label>
+              <label class="field">
+                <span>偏移行数</span>
+                <input id="offset-input" type="number" min="0" step="1" placeholder="例如：20" />
               </label>
             </div>
           </section>
@@ -317,11 +334,28 @@
                 <p class="section-kicker">Preview</p>
                 <h2>SQL 代码预览</h2>
               </div>
-              <button id="copy-sql-btn" type="button">复制 SQL</button>
+              <div class="preview-actions">
+                <select id="sql-dialect-select" title="SQL 方言">
+                  <option value="hive">Hive / Spark</option>
+                  <option value="mysql">MySQL</option>
+                  <option value="presto">Presto / Trino</option>
+                  <option value="plain">通用 SQL</option>
+                </select>
+                <label class="strict-toggle" title="严格模式会自动添加表别名和字段引用">
+                  <input id="sql-strict-mode-input" type="checkbox" checked />
+                  <span>严格模式</span>
+                </label>
+                <button id="copy-sql-btn" type="button">复制 SQL</button>
+              </div>
             </div>
             <div id="query-summary" class="summary-grid"></div>
             <div id="sql-status" class="sql-status"></div>
-            <pre id="sql-output" class="sql-output">-- SQL 会显示在这里</pre>
+            <textarea
+              id="sql-output"
+              class="sql-output"
+              spellcheck="false"
+              placeholder="-- SQL 会显示在这里，也可以直接手动编辑"
+            ></textarea>
           </section>
         </aside>
       </main>
