@@ -1,0 +1,43 @@
+# Local runtime data. These files may contain private DDL, table names,
+# saved query templates, model paths, and local AI configuration.
+data/*.json
+data/*.bak
+data/*.backup
+
+# Environment variables and local secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.csr
+
+# Python runtime files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / frontend tooling, if the project is migrated to a bundler later
+node_modules/
+dist/
+build/
+.vite/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+.cache/
+
+# OS / editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+

@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>智能 SQL 建模台</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="top-bar">
+        <div class="brand">
+          <div class="brand-mark">{ }</div>
+          <div>
+            <strong>智能 SQL 建模台</strong>
+            <span>Offline SQL Builder</span>
+          </div>
+        </div>
+        <div class="top-actions">
+          <div class="template-menu-wrap">
+            <button id="top-saved-queries-btn" type="button">我的模版 ▾</button>
+            <div id="top-saved-queries-menu" class="template-menu" hidden></div>
+          </div>
+          <button id="execute-sql-btn" class="primary" type="button">立即执行</button>
+        </div>
+      </header>
+
+      <main class="saas-layout">
+        <aside class="left-sidebar">
+          <div class="sidebar-tabs">
+            <button class="active" type="button">配置步骤</button>
+            <button type="button" data-config-tab="schema">模型结构</button>
+          </div>
+          <nav class="step-nav" aria-label="SQL Builder 配置导航">
+            <button class="step-button active" type="button" data-config-tab="model"><span>01</span>选择模型</button>
+            <button class="step-button" type="button" data-config-tab="query"><span>02</span>选择字段</button>
+            <button class="step-button" type="button" data-config-tab="join"><span>03</span>配置 Join</button>
+            <button class="step-button" type="button" data-config-tab="filter"><span>04</span>设置过滤</button>
+            <button class="step-button" type="button" data-config-tab="metric"><span>05</span>聚合排序</button>
+            <button class="step-button" type="button" data-config-tab="sort"><span>06</span>排序限制</button>
+            <button class="step-button" type="button" data-config-tab="ai"><span>07</span>AI 助手</button>
+          </nav>
+          <div class="sidebar-card">
+            <span id="model-status" class="status-chip muted">暂无模型</span>
+          </div>
+        </aside>
+
+        <section class="main-workspace">
+          <section class="panel compact-panel tab-panel active" data-tab-panel="model">
+            <div class="section-head">
+              <div>
+                <p class="section-kicker">1. 模型</p>
+                <h2>选择模型</h2>
+              </div>
+              <button id="delete-model-btn">删除当前模型</button>
+            </div>
+
+            <label class="field">
+              <span>当前模型</span>
+              <select id="model-select"></select>
+            </label>
+
+            <div class="builder-section">
+              <div class="section-head compact">
+                <div>
+                  <p class="section-kicker">新增或更新</p>
+                  <h2>导入 DDL 保存模型</h2>
+                </div>
+              </div>
+              <div class="form-grid">
+                <label class="field">
+                  <span>环境</span>
+                  <input id="model-env-input" type="text" list="model-env-options" placeholder="例如：pre、load、prd" />
+                  <datalist id="model-env-options">
+                    <option value="pre"></option>
+                    <option value="load"></option>
+                    <option value="prd"></option>
+                    <option value="demo"></option>
+                  </datalist>
+                </label>
+                <label class="field">
+                  <span>模型路径 / 名称</span>
+                  <input id="model-table-name-input" type="text" placeholder="例如：财务/成本/CUT表" />
+                </label>
+              </div>
+              <div class="inline-actions">
+                <button id="use-sample-draft-btn">载入演示 DDL</button>
+                <label class="file-pill">
+                  导入 .sql
+                  <input id="model-file-input" type="file" accept=".sql,text/plain" />
+                </label>
+              </div>
+              <textarea
+                id="model-ddl-input"
+                class="ddl-input compact-textarea"
+                spellcheck="false"
+                placeholder="把建表 DDL 粘贴到这里，然后保存为模型。"
+              ></textarea>
+              <div class="inline-actions">
+                <button id="save-model-btn" class="primary">保存为模型</button>
+                <button id="clear-model-draft-btn">清空草稿</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel compact-panel tab-panel" data-tab-panel="schema" hidden>
+            <div class="section-head">
+              <div>
+                <p class="section-kicker">2. 字段</p>
+                <h2>浏览模型结构</h2>
+              </div>
+            </div>
+            <div class="form-grid">
+              <label class="field">
+                <span>查找表</span>
+                <input id="schema-table-search" type="text" list="schema-table-options" placeholder="输入表名或字段名" />
+                <datalist id="schema-table-options"></datalist>
+              </label>
+              <label class="field">
+                <span>查找字段</span>
+                <input id="schema-column-search" type="text" list="schema-column-options" placeholder="输入字段名继续缩小范围" />
+                <datalist id="schema-column-options"></datalist>
+              </label>
+            </div>
+            <div id="schema-summary" class="schema-summary empty-state">
+              先选择一个模型，再用搜索方式查看表和字段。
+            </div>
+          </section>
+
+          <section class="panel compact-panel tab-panel" data-tab-panel="query" hidden>
+            <div class="section-head">
+              <div>
+                <p class="section-kicker">3. 查询</p>
+                <h2>配置查询</h2>
+              </div>
+            </div>
+            <div class="form-grid single">
+              <label class="field">
+                <span>基表</span>
+                <select id="base-table-select"></select>
+              </label>
+            </div>
+            <div class="template-strip compact-strip" id="template-strip"></div>
+            <div class="builder-section first-section">
+              <div class="section-head compact">
+                <div>
+                  <p class="section-kicker">输出字段</p>
+                  <h2>搜索添加</h2>
+                </div>
+              </div>
+              <div class="inline-picker">
+                <input id="dimension-add-input" type="text" list="dimension-field-options" placeholder="输入字段名搜索" />
+                <datalist id="dimension-field-options"></datalist>
+                <button id="add-dimension-btn">添加字段</button>
+              </div>
+              <div id="selected-dimensions-list" class="selected-list empty-state">
+                默认查询全部字段（SELECT *）。
+              </div>
+            </div>
+          </section>
+
+          <section class="panel compact-panel tab-panel" data-tab-panel="join" hidden>
+            <div class="section-head">
+              <div>
+                <p class="section-kicker">4. Join</p>
+                <h2>表关联配置</h2>
+              </div>
+              <button id="add-join-btn">新增 Join</button>
+            </div>
+            <div id="joins-list" class="rows-list empty-state">
+              先选择基表，再按需添加 Join。
+            </div>
+          </section>
+
+          <section class="panel compact-panel tab-panel" data-tab-panel="metric" hidden>
+            <div class="section-head">
+              <div>
+                <p class="section-kicker">5. 指标</p>
+                <h2>聚合指标</h2>
+              </div>
+              <button id="add-metric-btn">新增指标</button>
+            </div>
+            <div id="metrics-list" class="rows-list empty-state">
+              聚合查询和 Top N 查询可以在这里添加指标。
+            </div>
+          </section>
+
+          <section class="panel compact-panel tab-panel" data-tab-panel="filter" hidden>
+            <div class="section-head">
+              <div>
+                <p class="section-kicker">6. 过滤</p>
+                <h2>Where 条件</h2>
+              </div>
+              <div class="inline-actions">
+                <button id="add-filter-group-btn">新增条件组</button>
+                <button id="add-filter-btn">新增过滤条件</button>
+              </div>
+            </div>
+            <div id="filters-list" class="rows-list empty-state">
+              在这里配置字段过滤条件。
+            </div>
+          </section>
+
+          <section class="panel compact-panel tab-panel" data-tab-panel="sort" hidden>
+            <div class="section-head">
+              <div>
+                <p class="section-kicker">7. 排序</p>
+                <h2>排序和限制</h2>
+              </div>
+            </div>
+            <div class="form-grid">
+              <label class="field">
+                <span>排序字段</span>
+                <input id="sort-field-input" type="text" list="sort-field-options" placeholder="输入字段名或指标别名" />
+                <datalist id="sort-field-options"></datalist>
+              </label>
+              <label class="field">
+                <span>排序方向</span>
+                <select id="sort-direction-select">
+                  <option value="asc">升序</option>
+                  <option value="desc">降序</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>限制行数</span>
+                <input id="limit-input" type="number" min="1" step="1" value="100" />
+              </label>
+            </div>
+          </section>
+
+          <section class="panel compact-panel tab-panel" data-tab-panel="ai" hidden>
+            <div class="section-head">
+              <div>
+                <p class="section-kicker">8. AI</p>
+                <h2>AI 一句话生成 SQL</h2>
+              </div>
+            </div>
+            <div class="builder-section">
+              <div class="form-grid">
+                <label class="field">
+                  <span>执行方式</span>
+                  <select id="llm-provider-select">
+                    <option value="codex_cli">Codex 登录态</option>
+                    <option value="openai_compatible">OpenAI / 兼容接口</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>模型</span>
+                  <input id="llm-model-input" type="text" placeholder="留空则使用默认模型" />
+                </label>
+                <label class="field">
+                  <span>Base URL</span>
+                  <input id="llm-base-url-input" type="text" placeholder="https://api.openai.com/v1" />
+                </label>
+                <label class="field">
+                  <span>API Key 环境变量</span>
+                  <input id="llm-api-key-env-input" type="text" placeholder="OPENAI_API_KEY" />
+                </label>
+                <label class="field">
+                  <span>Reasoning Effort</span>
+                  <select id="llm-reasoning-effort-select">
+                    <option value="none">none</option>
+                    <option value="low">low</option>
+                    <option value="medium">medium</option>
+                    <option value="high">high</option>
+                    <option value="xhigh">xhigh</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Temperature</span>
+                  <input id="llm-temperature-input" type="number" min="0" max="2" step="0.1" />
+                </label>
+              </div>
+              <div class="inline-actions">
+                <button id="save-llm-config-btn" class="primary">保存 AI 配置</button>
+                <button id="refresh-codex-status-btn">刷新 Codex 登录态</button>
+                <span id="codex-login-status" class="status-chip muted">Codex 登录状态未检查</span>
+              </div>
+            </div>
+            <label class="field">
+              <span>一句话描述</span>
+              <textarea
+                id="ai-prompt-input"
+                class="ai-prompt"
+                placeholder="例如：按国家统计最近30天支付金额..."
+              ></textarea>
+            </label>
+            <div class="inline-actions">
+              <button id="generate-ai-sql-btn" class="primary">AI 生成 SQL</button>
+              <button id="clear-ai-result-btn">清除 AI 结果</button>
+              <span id="ai-result-status" class="status-chip muted">当前显示手动生成结果</span>
+            </div>
+          </section>
+
+        </section>
+
+        <aside class="right-panel">
+          <section class="panel saved-panel">
+            <div class="section-head compact">
+              <div>
+                <p class="section-kicker">Templates</p>
+                <h2>我的模版</h2>
+              </div>
+            </div>
+            <div class="inline-picker">
+              <input id="save-name-input" type="text" placeholder="目录/子目录/模版名称" />
+              <button id="save-query-btn" class="primary">保存</button>
+            </div>
+            <div id="saved-queries-list" class="saved-list empty-state">
+              保存后的查询模板会显示在这里。
+            </div>
+          </section>
+
+          <section class="panel preview-panel side-preview">
+            <div class="section-head compact">
+              <div>
+                <p class="section-kicker">Preview</p>
+                <h2>SQL 代码预览</h2>
+              </div>
+              <button id="copy-sql-btn" type="button">复制 SQL</button>
+            </div>
+            <div id="query-summary" class="summary-grid"></div>
+            <div id="sql-status" class="sql-status"></div>
+            <pre id="sql-output" class="sql-output">-- SQL 会显示在这里</pre>
+          </section>
+        </aside>
+      </main>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
