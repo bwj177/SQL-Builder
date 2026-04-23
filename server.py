@@ -269,13 +269,12 @@ def normalize_dictionary_payload(payload: dict) -> dict:
             continue
         term = str(item.get("term", "")).strip()
         field = str(item.get("field", "")).strip()
-        active_model_id = str(item.get("activeModelId", "")).strip()
-        if not term or not field or not active_model_id:
+        if not term or not field:
             continue
         entries.append(
             {
-                "id": str(item.get("id", "")).strip() or f"{active_model_id}:{term}:{field}",
-                "activeModelId": active_model_id,
+                "id": str(item.get("id", "")).strip() or f"{term}:{field}",
+                "activeModelId": str(item.get("activeModelId", "")).strip(),
                 "term": term,
                 "field": field,
                 "description": str(item.get("description", "")).strip(),
@@ -449,6 +448,34 @@ def summarize_dictionary_for_prompt(entries: list) -> str:
         if term and field:
             lines.append(f"- {term} => {field}{f'；说明：{description}' if description else ''}")
     return "\n".join(lines) if lines else "- 当前模型没有配置业务字段字典。"
+
+
+def filter_dictionary_entries_for_schema(entries: list, schema_summary) -> list:
+    catalog = build_schema_catalog(schema_summary)
+    if not catalog["tables"]:
+        return []
+    valid_fields = {
+        f"{table}.{column}"
+        for table, columns in catalog["tables"].items()
+        for column in columns
+    }
+    table_lookup = catalog["tableLookup"]
+    filtered = []
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        field = normalize_sql_name(item.get("field", ""))
+        if field in valid_fields:
+            filtered.append(item)
+            continue
+        parts = field.split(".")
+        if len(parts) >= 2:
+            table_part = ".".join(parts[:-1])
+            column = parts[-1]
+            canonical_table = table_lookup.get(table_part)
+            if canonical_table and f"{canonical_table}.{column}" in valid_fields:
+                filtered.append({**item, "field": f"{canonical_table}.{column}"})
+    return filtered
 
 
 def summarize_schema_for_prompt(schema_summary) -> str:
@@ -864,9 +891,10 @@ def call_llm_for_sql(prompt: str, active_model_id: str, builder_spec: dict) -> d
         for item in queries_payload["savedQueries"]
         if isinstance(item.get("spec"), dict) and item["spec"].get("activeModelId") == active_model_id
     ]
-    related_dictionary_entries = [
-        item for item in dictionary_payload["entries"] if item.get("activeModelId") == active_model_id
-    ]
+    related_dictionary_entries = filter_dictionary_entries_for_schema(
+        dictionary_payload["entries"],
+        builder_spec.get("schemaSummary"),
+    )
 
     if llm_config["provider"] == "codex_cli":
         return call_codex_cli_for_sql(

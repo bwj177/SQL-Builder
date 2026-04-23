@@ -38,7 +38,8 @@
             <button class="step-button" type="button" data-config-tab="filter"><span>04</span>设置过滤</button>
             <button class="step-button" type="button" data-config-tab="metric"><span>05</span>聚合排序</button>
             <button class="step-button" type="button" data-config-tab="sort"><span>06</span>排序限制</button>
-            <button class="step-button" type="button" data-config-tab="ai"><span>07</span>AI 助手</button>
+            <button class="step-button" type="button" data-config-tab="dictionary"><span>07</span>字段字典</button>
+            <button class="step-button" type="button" data-config-tab="ai"><span>08</span>AI 助手</button>
           </nav>
           <div class="sidebar-card">
             <span id="model-status" class="status-chip muted">暂无模型</span>
@@ -309,13 +310,16 @@
               <button id="clear-ai-result-btn">清除 AI 结果</button>
               <span id="ai-result-status" class="status-chip muted">当前显示手动生成结果</span>
             </div>
-            <div class="builder-section">
-              <div class="section-head compact">
-                <div>
-                  <p class="section-kicker">Dictionary</p>
-                  <h2>业务字段字典</h2>
-                </div>
+          </section>
+
+          <section class="panel compact-panel tab-panel" data-tab-panel="dictionary" hidden>
+            <div class="section-head">
+              <div>
+                <p class="section-kicker">7. Dictionary</p>
+                <h2>业务字段字典</h2>
               </div>
+            </div>
+            <div class="builder-section">
               <div class="form-grid">
                 <label class="field">
                   <span>业务词</span>
@@ -332,9 +336,9 @@
                 </label>
               </div>
               <div class="inline-actions">
-                <button id="add-dictionary-entry-btn">保存字典项</button>
+                <button id="add-dictionary-entry-btn" class="primary">保存字典项</button>
               </div>
-              <div id="dictionary-list" class="saved-list empty-state">当前模型还没有配置业务字段字典。</div>
+              <div id="dictionary-list" class="saved-list empty-state">还没有配置业务字段字典。</div>
             </div>
           </section>
 

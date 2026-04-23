@@ -3025,25 +3025,21 @@ CREATE TABLE refunds (
   }
 
   function getActiveDictionaryEntries() {
-    return state.dictionaryEntries.filter((item) => item.activeModelId === state.activeModelId);
+    return state.dictionaryEntries;
   }
 
   async function handleSaveDictionaryEntry() {
     const term = dom.dictTermInput.value.trim();
     const fieldMatch = findFieldMatch(dom.dictFieldInput.value);
     const description = dom.dictDescriptionInput.value.trim();
-    if (!state.activeModelId) {
-      pushSqlStatus("error", "请先选择模型，再保存字段字典。");
-      return;
-    }
     if (!term || !fieldMatch) {
       pushSqlStatus("error", "请输入业务词，并选择一个 DDL 中存在的字段。");
       return;
     }
-    const id = `${state.activeModelId}:${term}:${fieldMatch.id}`;
+    const id = `${term}:${fieldMatch.id}`;
     const entry = {
       id,
-      activeModelId: state.activeModelId,
+      activeModelId: "",
       term,
       field: fieldMatch.id,
       description,
@@ -3073,21 +3069,37 @@ CREATE TABLE refunds (
     const entries = getActiveDictionaryEntries();
     if (!entries.length) {
       dom.dictionaryList.className = "saved-list empty-state";
-      dom.dictionaryList.textContent = "当前模型还没有配置业务字段字典。";
+      dom.dictionaryList.textContent = "还没有配置业务字段字典。";
       return;
     }
     dom.dictionaryList.className = "saved-list";
     dom.dictionaryList.innerHTML = entries
       .map(
-        (entry) => `
-          <article class="saved-query-card">
-            <div>
-              <strong>${escapeHtml(entry.term)}</strong>
-              <p>${escapeHtml(entry.field)}${entry.description ? ` · ${escapeHtml(entry.description)}` : ""}</p>
+        (entry) => {
+          const field = getFieldById(entry.field);
+          const fieldName = field?.name || entry.field.split(".").pop() || entry.field;
+          const tableName = field?.table || entry.field.split(".").slice(0, -1).join(".");
+          const typeName = field?.type || "";
+          const comment = field?.comment || "";
+          return `
+          <article class="dict-card">
+            <div class="dict-card-main">
+              <div class="dict-term-row">
+                <span class="dict-term">${escapeHtml(entry.term)}</span>
+                <span class="dict-arrow">-></span>
+                <code class="dict-field-name">${escapeHtml(fieldName)}</code>
+                ${typeName ? `<span class="dict-type">${escapeHtml(typeName)}</span>` : ""}
+              </div>
+              <div class="dict-meta-row">
+                ${tableName ? `<span title="${escapeAttr(tableName)}">${escapeHtml(shortenText(tableName, 72))}</span>` : ""}
+                ${comment ? `<span>${escapeHtml(comment)}</span>` : ""}
+                ${entry.description ? `<span>${escapeHtml(entry.description)}</span>` : ""}
+              </div>
             </div>
-            <button class="icon-button" data-delete-dict-entry="${escapeAttr(entry.id)}">删除</button>
+            <button class="dict-delete" data-delete-dict-entry="${escapeAttr(entry.id)}">删除</button>
           </article>
-        `
+        `;
+        }
       )
       .join("");
   }
